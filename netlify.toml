@@ -1,6 +1,7 @@
 [build]
   command = "npm run build"
-  functions = "netlify/functions"
+  publish = "dist"      # This is where your compiled files go
+  functions = "dist/netlify/functions" # This tells Netlify: "Look here for the actual functions"
 
 [functions]
   node_bundler = "esbuild"
