@@ -3,18 +3,18 @@ import { supabase } from '../../src/supabase';
 import { getBestIcon } from '../../src/icons';
 
 export const handler: Handler = async (event) => {
-    // 1. Get feeds that are missing icons
-    const { data: feeds } = await supabase
+    const { data: feeds, error } = await supabase
         .from('feeds')
         .select('id, url')
-        .is('icon_url', null);
+        .is('icon_url', null)
+        .limit(10); 
 
+    if (error) return { statusCode: 500, body: error.message };
     if (!feeds || feeds.length === 0) {
-        return { statusCode: 200, body: 'All icons are already set.' };
+        return { statusCode: 200, body: 'All icons updated!' };
     }
 
-    console.log(`Updating icons for ${feeds.length} feeds...`);
-
+    let updatedCount = 0;
     for (const feed of feeds) {
         const icon = await getBestIcon(feed.url);
         if (icon) {
@@ -22,9 +22,12 @@ export const handler: Handler = async (event) => {
                 .from('feeds')
                 .update({ icon_url: icon })
                 .eq('id', feed.id);
-            console.log(`✅ Set icon for ${feed.url}`);
+            updatedCount++;
         }
     }
 
-    return { statusCode: 200, body: `Updated ${feeds.length} icons.` };
+    return { 
+        statusCode: 200, 
+        body: `Processed 10 feeds. ${updatedCount} icons found. Refresh to do more.` 
+    };
 };
