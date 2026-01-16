@@ -12,7 +12,7 @@ export const handler: Handler = async (event, context) => {
                 published_at, 
                 image_url, 
                 feeds (
-                    id,         // <--- ADDING THIS
+                    id,
                     name, 
                     category, 
                     url
@@ -25,7 +25,6 @@ export const handler: Handler = async (event, context) => {
 
         const response = {
             generated_at: new Date().toISOString(),
-            // ... (keep your signals object same as before) ...
             signals: {
                 news: "GREEN|MARKET STABLE",
                 future: "AI AGENTS DEPLOYING",
@@ -34,7 +33,7 @@ export const handler: Handler = async (event, context) => {
                 sports: "SEASON START",
                 research: "MODEL V4 LEAKED"
             },
-            items: (items || []).map(i => {
+            items: (items || []).map((i: any) => {
                 const feedInfo = Array.isArray(i.feeds) ? i.feeds[0] : i.feeds;
                 
                 // Safe Hostname Extraction
@@ -61,7 +60,10 @@ export const handler: Handler = async (event, context) => {
 
         return {
             statusCode: 200,
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*' // Good for debugging locally
+            },
             body: JSON.stringify(response)
         };
 
