@@ -22,16 +22,13 @@ export const handler = async (event: any, context: any) => {
                 )
             `)
             .order('published_at', { ascending: false })
-            .limit(100);
+            .limit(10000); // ✅ UPDATED: Covers your full DB (approx 4500 items)
 
         if (error) throw error;
 
         const response = {
             generated_at: new Date().toISOString(),
-            
-            // ✅ FIXED: Changed from [] to {} to match Swift "Dictionary" expectation
             signals: {}, 
-
             items: (items || []).map((i: any) => {
                 const feedInfo = Array.isArray(i.feeds) ? i.feeds[0] : i.feeds;
                 
@@ -41,7 +38,7 @@ export const handler = async (event: any, context: any) => {
                     catch (e) { domain = 'source.com'; }
                 }
 
-                const dbCategory = feedInfo?.category || null;
+                const dbCategory = feedInfo?.category || 'News';
 
                 return {
                     id: i.id,
