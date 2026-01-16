@@ -1,73 +1,31 @@
-// netlify/functions/manifest.ts
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
-import { Handler } from '@netlify/functions';
-import { supabase } from '../../src/supabase';
+export default async (req: Request) => {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
+  const supabaseKey = Deno.env.get('SUPABASE_KEY') ?? '' 
+  const supabase = createClient(supabaseUrl, supabaseKey)
 
-export const handler: Handler = async (event, context) => {
-    try {
-        const { data: items, error } = await supabase
-            .from('items')
-            .select(`
-                id, 
-                title, 
-                url, 
-                published_at, 
-                image_url, 
-                feeds (
-                    id,
-                    name, 
-                    url,
-                    // LINK TO NEW TABLE
-                    categories (
-                        name
-                    )
-                )
-            `)
-            .order('published_at', { ascending: false })
-            .limit(100);
+  try {
+    // UPDATED: We now select 'category' and order by it
+    const { data, error } = await supabase
+      .from('feeds')
+      .select('id, name, url, category')
+      .order('category', { ascending: true })
 
-        if (error) throw error;
+    if (error) throw error
 
-        const response = {
-            generated_at: new Date().toISOString(),
-            // ... (keep your signals logic) ...
-            items: (items || []).map((i: any) => {
-                const feedInfo = Array.isArray(i.feeds) ? i.feeds[0] : i.feeds;
-                
-                // HOSTNAME EXTRACTION
-                let domain = 'news.source';
-                if (feedInfo?.url) {
-                    try { domain = new URL(feedInfo.url).hostname.replace('www.', ''); } 
-                    catch (e) { domain = 'source.com'; }
-                }
+    return new Response(JSON.stringify(data), {
+      headers: { 
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*" 
+      },
+      status: 200
+    })
 
-                // CATEGORY PRIORITY:
-                // 1. DB Relation (The Truth)
-                // 2. Client Normalizer (The Fallback)
-                // Note: We send the DB name if it exists, otherwise null so Client Normalizer takes over
-                const dbCategory = feedInfo?.categories?.name || null;
-
-                return {
-                    id: i.id,
-                    title: i.title || 'Untitled',
-                    url: i.url || '#',
-                    feed_id: feedInfo?.id || '00000000-0000-0000-0000-000000000000', 
-                    source_name: feedInfo?.name || 'General News',
-                    source_domain: domain,
-                    category: dbCategory, // <--- SENDING THE REAL DB CATEGORY NOW
-                    published_at: i.published_at,
-                    image_url: i.image_url || null
-                };
-            })
-        };
-
-        return {
-            statusCode: 200,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(response)
-        };
-
-    } catch (err: any) {
-        return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
-    }
-};
+  } catch (err) {
+    return new Response(JSON.stringify({ error: err.message }), {
+      headers: { "Content-Type": "application/json" },
+      status: 500
+    })
+  }
+}
