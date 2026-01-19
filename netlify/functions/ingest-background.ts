@@ -175,4 +175,9 @@ export const handler = schedule('*/10 * * * *', async (event) => {
     }));
 
     // 3. Cleanup
-    const { count } = await supabase
+    const { count } = await supabase.from('items').delete({ count: 'exact' }).lt('published_at', cutoffDate.toISOString());
+    if (count && count > 0) console.log(`🧹 Cleanup: Removed ${count} items older than ${RETENTION_DAYS} days.`);
+    
+    console.log("✅ Batch complete.");
+    return { statusCode: 200 };
+});
