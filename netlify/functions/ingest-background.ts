@@ -47,10 +47,15 @@ const findImage = (item: any): string | null => {
 };
 
 // --- HELPER: SMART FAVICON FINDER (Server-Side Strategy) ---
-const getSmartIconUrl = async (feedUrl: string): Promise<string> => {
+const getSmartIconUrl = async (siteUrl: string): Promise<string> => {
     try {
-        const urlObj = new URL(feedUrl);
-        const domain = urlObj.hostname.replace('www.', '');
+        const urlObj = new URL(siteUrl);
+        // Strip subdomains like 'feeds.', 'rss.', 'api.' to find the root brand
+        const domain = urlObj.hostname
+            .replace('www.', '')
+            .replace('feeds.', '')
+            .replace('rss.', '')
+            .replace('api.', '');
 
         // 1. Try Clearbit (High Res / Official Logos) - Always HTTPS
         const clearbitUrl = `https://logo.clearbit.com/${domain}?size=128`;
@@ -81,7 +86,7 @@ const isFatalError = (err: any) => {
 };
 
 export const handler = schedule('*/10 * * * *', async (event) => {
-    console.log(`⚡️ Ingest started (Self-Healing Mode)...`);
+    console.log(`⚡️ Ingest started (Site-Based Icons Mode)...`);
     
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - RETENTION_DAYS);
@@ -101,27 +106,33 @@ export const handler = schedule('*/10 * * * *', async (event) => {
     // 2. Process Feeds
     await Promise.all(feeds.map(async (feed) => {
         try {
-            // --- 2a. AUTO-RESOLVE ICON (If missing OR Insecure) ---
-            // This is the "Self-Healing" logic
+            // Parse first to get metadata
+            const feedData = await parser.parseURL(feed.url);
+            
+            // --- 2a. AUTO-RESOLVE ICON (If missing, insecure, or generic) ---
             let needsIconUpdate = false;
             
-            if (!feed.icon_url) {
-                needsIconUpdate = true;
-            } else if (feed.icon_url.startsWith('http:')) {
-                console.log(`⚠️ Detected insecure icon for ${feed.name}: ${feed.icon_url}`);
+            // Re-check bad icons (feedburner, insecure http, or missing)
+            if (!feed.icon_url || 
+                feed.icon_url.startsWith('http:') || 
+                feed.icon_url.includes('feedburner') ||
+                feed.icon_url.includes('bbci.co.uk') || // BBC specific fix
+                feed.icon_url.includes('foxsports')) {  // Fox specific fix
                 needsIconUpdate = true;
             }
 
             if (needsIconUpdate) {
-                const newIcon = await getSmartIconUrl(feed.url);
+                // CRITICAL FIX: Use the Website Link (e.g. bbc.com), not the Feed Link (e.g. feeds.bbci.co.uk)
+                const homepage = feedData.link || feed.url;
+                const newIcon = await getSmartIconUrl(homepage);
+                
                 if (newIcon) {
                     await supabase.from('feeds').update({ icon_url: newIcon }).eq('id', feed.id);
-                    console.log(`🎨 Icon updated for ${feed.name} -> ${newIcon}`);
+                    console.log(`🎨 Icon updated for ${feed.name} using [${homepage}] -> ${newIcon}`);
                 }
             }
 
             // --- 2b. PROCESS FEED ITEMS ---
-            const feedData = await parser.parseURL(feed.url);
             const allItems = feedData.items || [];
             
             const recentItems = allItems.filter((i: any) => {
