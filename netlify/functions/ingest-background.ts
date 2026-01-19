@@ -2,6 +2,12 @@ import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import Parser from 'rss-parser';
 
+// --------------------------------------------------------------------------
+// CONFIGURATION
+// --------------------------------------------------------------------------
+const RETENTION_DAYS = 90; // Feeds older than this are considered "Stale" and disabled
+// --------------------------------------------------------------------------
+
 const parser = new Parser({
     timeout: 5000, 
     headers: {
@@ -15,7 +21,6 @@ const supabase = createClient(
     process.env.SUPABASE_KEY || ''
 );
 
-// Helper to check for hard errors (404, 403, etc)
 const isFatalError = (err: any) => {
     const msg = (err.message || String(err)).toLowerCase();
     return msg.includes('status code 404') || 
@@ -27,9 +32,13 @@ const isFatalError = (err: any) => {
 };
 
 export const handler = schedule('*/10 * * * *', async (event) => {
-    console.log("⚡️ Diagnostic Ingest started...");
+    console.log(`⚡️ Ingest started (${RETENTION_DAYS}-day strict policy)...`);
     
-    // 1. Get 10 feeds (Oldest fetched first)
+    // Calculate the Cutoff Date once
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - RETENTION_DAYS);
+
+    // 1. Get 10 feeds
     const { data: feeds } = await supabase
         .from('feeds')
         .select('id, url, name') 
@@ -45,13 +54,20 @@ export const handler = schedule('*/10 * * * *', async (event) => {
     await Promise.all(feeds.map(async (feed) => {
         try {
             const feedData = await parser.parseURL(feed.url);
-            const items = feedData.items || [];
+            const allItems = feedData.items || [];
             
-            if (items.length > 0) {
-                // --- SUCCESS PATH ---
-                
-                // 1. Calculate Dates & Log Status
-                const rows = items.map((i: any) => ({
+            // ---------------------------------------------------------
+            // THE "STALE CHECK": Filter out old items immediately
+            // ---------------------------------------------------------
+            const recentItems = allItems.filter((i: any) => {
+                const dateStr = i.isoDate || i.pubDate || new Date().toISOString();
+                const itemDate = new Date(dateStr);
+                return itemDate >= cutoffDate;
+            });
+
+            // --- SUCCESS PATH (Has Recent Items) ---
+            if (recentItems.length > 0) {
+                const rows = recentItems.map((i: any) => ({
                     feed_id: feed.id,
                     title: i.title || 'Untitled',
                     url: i.link || i.enclosure?.url || i.guid, 
@@ -61,41 +77,45 @@ export const handler = schedule('*/10 * * * *', async (event) => {
                     image_url: i.enclosure?.url || i.itunes?.image || null
                 }));
 
-                // Find the newest item date for logging
-                const dates = rows.map((r: any) => new Date(r.published_at).getTime());
-                const newestDate = new Date(Math.max(...dates));
-                
-                console.log(`✅ [${feed.name}]: ${items.length} items. Newest: ${newestDate.toISOString().split('T')[0]}`);
+                const newestDate = new Date(Math.max(...rows.map((r: any) => new Date(r.published_at).getTime())));
+                console.log(`✅ [${feed.name}]: ${recentItems.length} recent items. Newest: ${newestDate.toISOString().split('T')[0]}`);
 
                 const validRows = rows.filter((r: any) => r.url && r.title);
-
                 if (validRows.length > 0) {
                     await supabase
                         .from('items')
                         .upsert(validRows, { onConflict: 'url', ignoreDuplicates: true });
                 }
 
-                // Mark as Healthy
                 await supabase.from('feeds')
                     .update({ last_fetched_at: new Date().toISOString() })
                     .eq('id', feed.id);
-
-            } else {
-                // --- EMPTY PATH ---
-                console.warn(`💀 EMPTY: Disabling ${feed.name} (0 items).`);
+            } 
+            // --- FAILURE PATH (Empty OR Stale) ---
+            else {
+                const reason = allItems.length === 0 ? "EMPTY (0 items)" : `STALE (No items < ${RETENTION_DAYS} days)`;
+                console.warn(`💀 KILL: Disabling ${feed.name} -> ${reason}`);
                 
+                // Log to Triage
                 await supabase.from('feed_errors').insert({
-                    feed_id: feed.id, feed_name: feed.name, feed_url: feed.url,
-                    error_code: 'NO_ITEMS', error_message: 'Feed returned 0 items'
+                    feed_id: feed.id, 
+                    feed_name: feed.name, 
+                    feed_url: feed.url,
+                    error_code: allItems.length === 0 ? 'NO_ITEMS' : 'STALE', 
+                    error_message: `Feed disabled: ${reason}`
                 });
 
+                // Disable Feed
                 await supabase.from('feeds')
-                    .update({ is_active: false, last_fetched_at: new Date().toISOString() })
+                    .update({ 
+                        is_active: false, 
+                        last_fetched_at: new Date().toISOString() 
+                    })
                     .eq('id', feed.id);
             }
 
         } catch (err: any) {
-            // --- FAILURE PATH ---
+            // --- ERROR PATH ---
             const errorMsg = err.message || String(err);
             
             if (isFatalError(err)) {
@@ -118,16 +138,15 @@ export const handler = schedule('*/10 * * * *', async (event) => {
         }
     }));
 
-    // 3. Cleanup (Logged)
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    
+    // 3. CLEANUP (Aligns with Retention Policy)
     const { count } = await supabase
         .from('items')
         .delete({ count: 'exact' })
-        .lt('published_at', sevenDaysAgo.toISOString());
+        .lt('published_at', cutoffDate.toISOString());
 
-    console.log(`🧹 Cleanup: Removed ${count} old items.`);
+    if (count && count > 0) {
+        console.log(`🧹 Cleanup: Removed ${count} items older than ${RETENTION_DAYS} days.`);
+    }
     
     console.log("✅ Batch complete.");
     return { statusCode: 200 };
