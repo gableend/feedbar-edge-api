@@ -7,7 +7,7 @@ export const handler = async (event: any, context: any) => {
 
     try {
         const [itemsResult, sourcesResult] = await Promise.all([
-            // 1. ITEMS QUERY: Query the WORKING VIEW
+            // 1. ITEMS QUERY
             supabase
                 .from('v_manifest') 
                 .select(`
@@ -29,8 +29,8 @@ export const handler = async (event: any, context: any) => {
             // 2. SOURCES QUERY
             supabase
                 .from('feeds')
-                .select('id, name, url, category')
-                .eq('is_active', true) // 👈 CRITICAL FIX: Only fetch active feeds
+                .select('id, name, url, category, icon_url') // 👈 ADDED icon_url HERE
+                .eq('is_active', true) 
                 .order('name', { ascending: true })
         ]);
 
@@ -40,7 +40,6 @@ export const handler = async (event: any, context: any) => {
         const itemsData = itemsResult.data || [];
         const sourcesData = sourcesResult.data || [];
 
-        // Helper
         const getDomain = (url: string) => {
             try { return new URL(url).hostname.replace('www.', ''); } 
             catch (e) { return 'source.com'; }
@@ -55,6 +54,7 @@ export const handler = async (event: any, context: any) => {
                 domain: getDomain(s.url),
                 category: s.category || 'General',
                 url: s.url,
+                icon_url: s.icon_url, // 👈 ADDED icon_url HERE
                 default_enabled: true 
             })),
 
