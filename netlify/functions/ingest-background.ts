@@ -2,7 +2,6 @@ import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import Parser from 'rss-parser';
 
-// Initialize Parser
 const parser = new Parser({
     timeout: 5000, 
     headers: {
@@ -16,6 +15,7 @@ const supabase = createClient(
     process.env.SUPABASE_KEY || ''
 );
 
+// Helper to check for hard errors (404, 403, etc)
 const isFatalError = (err: any) => {
     const msg = (err.message || String(err)).toLowerCase();
     return msg.includes('status code 404') || 
@@ -27,9 +27,9 @@ const isFatalError = (err: any) => {
 };
 
 export const handler = schedule('*/10 * * * *', async (event) => {
-    console.log("⚡️ Aggressive Ingest started...");
+    console.log("⚡️ Diagnostic Ingest started...");
     
-    // 1. Get 10 feeds
+    // 1. Get 10 feeds (Oldest fetched first)
     const { data: feeds } = await supabase
         .from('feeds')
         .select('id, url, name') 
@@ -44,12 +44,13 @@ export const handler = schedule('*/10 * * * *', async (event) => {
     // 2. Process Feeds
     await Promise.all(feeds.map(async (feed) => {
         try {
-            // Attempt Fetch
             const feedData = await parser.parseURL(feed.url);
             const items = feedData.items || [];
             
-            // --- SUCCESS PATH ---
             if (items.length > 0) {
+                // --- SUCCESS PATH ---
+                
+                // 1. Calculate Dates & Log Status
                 const rows = items.map((i: any) => ({
                     feed_id: feed.id,
                     title: i.title || 'Untitled',
@@ -59,6 +60,12 @@ export const handler = schedule('*/10 * * * *', async (event) => {
                     summary: (i.contentSnippet || i.content || i.summary || '').substring(0, 300),
                     image_url: i.enclosure?.url || i.itunes?.image || null
                 }));
+
+                // Find the newest item date for logging
+                const dates = rows.map((r: any) => new Date(r.published_at).getTime());
+                const newestDate = new Date(Math.max(...dates));
+                
+                console.log(`✅ [${feed.name}]: ${items.length} items. Newest: ${newestDate.toISOString().split('T')[0]}`);
 
                 const validRows = rows.filter((r: any) => r.url && r.title);
 
@@ -72,26 +79,18 @@ export const handler = schedule('*/10 * * * *', async (event) => {
                 await supabase.from('feeds')
                     .update({ last_fetched_at: new Date().toISOString() })
                     .eq('id', feed.id);
-            } 
-            // --- EMPTY PATH (New Aggressive Triage) ---
-            else {
-                console.warn(`💀 EMPTY: Disabling ${feed.name} (0 items returned).`);
+
+            } else {
+                // --- EMPTY PATH ---
+                console.warn(`💀 EMPTY: Disabling ${feed.name} (0 items).`);
                 
-                // 1. Log to Triage
                 await supabase.from('feed_errors').insert({
-                    feed_id: feed.id,
-                    feed_name: feed.name,
-                    feed_url: feed.url,
-                    error_code: 'NO_ITEMS',
-                    error_message: 'Feed returned 0 items (Soft Fail or Empty)'
+                    feed_id: feed.id, feed_name: feed.name, feed_url: feed.url,
+                    error_code: 'NO_ITEMS', error_message: 'Feed returned 0 items'
                 });
 
-                // 2. Kill the Feed
                 await supabase.from('feeds')
-                    .update({ 
-                        is_active: false, 
-                        last_fetched_at: new Date().toISOString() 
-                    })
+                    .update({ is_active: false, last_fetched_at: new Date().toISOString() })
                     .eq('id', feed.id);
             }
 
@@ -100,24 +99,18 @@ export const handler = schedule('*/10 * * * *', async (event) => {
             const errorMsg = err.message || String(err);
             
             if (isFatalError(err)) {
-                console.error(`💀 FATAL: Disabling ${feed.name} due to hard error.`);
+                console.error(`💀 FATAL: Disabling ${feed.name} (${errorMsg.substring(0, 40)})`);
                 
                 await supabase.from('feed_errors').insert({
-                    feed_id: feed.id,
-                    feed_name: feed.name,
-                    feed_url: feed.url,
-                    error_code: errorMsg.includes('404') ? '404' : (errorMsg.includes('403') ? '403' : 'XML_ERROR'),
-                    error_message: errorMsg
+                    feed_id: feed.id, feed_name: feed.name, feed_url: feed.url,
+                    error_code: 'FATAL', error_message: errorMsg
                 });
 
                 await supabase.from('feeds')
-                    .update({ 
-                        is_active: false, 
-                        last_fetched_at: new Date().toISOString()
-                    })
+                    .update({ is_active: false, last_fetched_at: new Date().toISOString() })
                     .eq('id', feed.id);
             } else {
-                // Temporary Error (500, Timeout) - Just touch timestamp
+                console.log(`⚠️ Retry: ${feed.name} (${errorMsg.substring(0, 40)})`);
                  await supabase.from('feeds')
                     .update({ last_fetched_at: new Date().toISOString() })
                     .eq('id', feed.id);
@@ -125,12 +118,17 @@ export const handler = schedule('*/10 * * * *', async (event) => {
         }
     }));
 
-    // 3. Cleanup
+    // 3. Cleanup (Logged)
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
     
-    await supabase.from('items').delete().lt('published_at', sevenDaysAgo.toISOString());
+    const { count } = await supabase
+        .from('items')
+        .delete({ count: 'exact' })
+        .lt('published_at', sevenDaysAgo.toISOString());
 
+    console.log(`🧹 Cleanup: Removed ${count} old items.`);
+    
     console.log("✅ Batch complete.");
     return { statusCode: 200 };
 });
