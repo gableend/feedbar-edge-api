@@ -6,6 +6,6 @@
 [functions]
   node_bundler = "esbuild"
 
-# Scheduled functions are now a native feature, no plugin required!
-[functions."ingest"]
+# ✅ FIX: Point to the new filename "ingest-background"
+[functions."ingest-background"]
   schedule = "*/10 * * * *"
