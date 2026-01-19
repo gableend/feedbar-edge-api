@@ -9,7 +9,7 @@ export const handler = async (event: any, context: any) => {
         const [itemsResult, sourcesResult] = await Promise.all([
             // 1. ITEMS QUERY: Query the WORKING VIEW
             supabase
-                .from('v_manifest') // ✅ FIXED: Pointing to the correct view
+                .from('v_manifest') 
                 .select(`
                     id, 
                     title, 
@@ -24,12 +24,13 @@ export const handler = async (event: any, context: any) => {
                     )
                 `)
                 .order('published_at', { ascending: false })
-                .limit(5000), // ✅ FIXED: Safety cap (covers all 139 feeds x 30 items)
+                .limit(5000), 
 
             // 2. SOURCES QUERY
             supabase
                 .from('feeds')
                 .select('id, name, url, category')
+                .eq('is_active', true) // 👈 CRITICAL FIX: Only fetch active feeds
                 .order('name', { ascending: true })
         ]);
 
