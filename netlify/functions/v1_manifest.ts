@@ -12,16 +12,24 @@ function resp(
   opts: { etag?: string; cacheControl?: string } = {}
 ) {
   const origin = process.env.CORS_ALLOW_ORIGIN ?? '*'
+
+  // Key: do NOT vary on If-None-Match (it fragments caches + creates noise)
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type,If-None-Match',
-    'Vary': 'Origin, If-None-Match'
+    'Vary': 'Origin'
   }
+
   if (opts.cacheControl) headers['Cache-Control'] = opts.cacheControl
   if (opts.etag) headers['ETag'] = opts.etag
-  return { statusCode, headers, body: typeof body === 'string' ? body : JSON.stringify(body) }
+
+  return {
+    statusCode,
+    headers,
+    body: typeof body === 'string' ? body : JSON.stringify(body)
+  }
 }
 
 // Deterministic sort helpers
@@ -54,6 +62,11 @@ export const handler: Handler = async (event) => {
   if (!url || !key) return resp(500, { error: 'Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY' })
 
   const supabase = createClient(url, key, { auth: { persistSession: false } })
+
+  // If your #1 goal is avoiding noise/costs at scale:
+  // - CDN caches for an hour (s-maxage=3600)
+  // - Edge can serve stale while it revalidates in background
+  // - Browsers can keep a short max-age to reduce revalidation chatter
   const cacheControl = 'public, max-age=300, s-maxage=3600, stale-while-revalidate=86400'
 
   try {
@@ -72,6 +85,7 @@ export const handler: Handler = async (event) => {
       cadence_minutes: toNullableInt(t.cadence_minutes),
       uses_sentiment_color: !!t.uses_sentiment_color
     }))
+
     topics.sort((a: any, b: any) => {
       const so = cmpNullableNumber(a.sort_order, b.sort_order)
       if (so !== 0) return so
@@ -120,17 +134,19 @@ export const handler: Handler = async (event) => {
       limit_per_feed_max: 30
     }
 
-    // Response body
+    // Response body:
+    // Keep generated_at for humans, but NEVER let it affect ETag determinism.
+    // Also do NOT fallback to Date() here, or you reintroduce nondeterminism.
     const response = {
       api_version: '1.0',
-      generated_at: row?.generated_at ?? null, // do NOT fallback to Date() or you reintroduce nondeterminism
+      generated_at: row?.generated_at ?? null,
       cache_ttl_sec: 3600,
       limits,
       topics,
       feed_index
     }
 
-    // ETag should be based on a stable representation (exclude generated_at)
+    // ETag based on stable representation (exclude generated_at)
     const etagPayload = {
       api_version: response.api_version,
       cache_ttl_sec: response.cache_ttl_sec,
@@ -141,6 +157,7 @@ export const handler: Handler = async (event) => {
 
     const etag = `"${sha256(JSON.stringify(etagPayload))}"`
     const inm = event.headers['if-none-match'] || event.headers['If-None-Match']
+
     if (inm && inm === etag) return resp(304, '', { etag, cacheControl })
 
     return resp(200, response, { etag, cacheControl })
