@@ -6,18 +6,29 @@ function sha256(input: string) {
   return crypto.createHash('sha256').update(input).digest('hex')
 }
 
-function resp(statusCode: number, body: any, opts: { etag?: string; cacheControl?: string } = {}) {
+function resp(
+  statusCode: number,
+  body: any,
+  opts: { etag?: string; cacheControl?: string } = {}
+) {
   const origin = process.env.CORS_ALLOW_ORIGIN ?? '*'
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type,If-None-Match',
+    // Important: If-None-Match affects the representation (200 body vs 304 empty)
     'Vary': 'Origin,If-None-Match'
   }
+
   if (opts.cacheControl) headers['Cache-Control'] = opts.cacheControl
   if (opts.etag) headers['ETag'] = opts.etag
-  return { statusCode, headers, body: typeof body === 'string' ? body : JSON.stringify(body) }
+
+  return {
+    statusCode,
+    headers,
+    body: typeof body === 'string' ? body : JSON.stringify(body)
+  }
 }
 
 function toInt(v: any, fallback: number) {
@@ -37,7 +48,7 @@ export const handler: Handler = async (event) => {
   const cacheControl = 'public, max-age=30, s-maxage=120, stale-while-revalidate=900'
 
   try {
-    // Canonicalize query inputs (reduce pointless cache misses)
+    // Canonicalize inputs to reduce cache fragmentation
     const rawSlug = (event.queryStringParameters?.topic_slug ?? '').toString()
     const topicSlug = rawSlug.trim().toLowerCase()
     if (!topicSlug) return resp(400, { error: 'Missing topic_slug' })
@@ -56,26 +67,21 @@ export const handler: Handler = async (event) => {
     const topic = row?.topic ?? { topic_slug: topicSlug, label: null }
     const items = Array.isArray(row?.items) ? row.items : []
 
-    // Keep generated_at only if DB provides it (do NOT fall back to Date())
+    // IMPORTANT: keep the response free of "now()" fields so body == etag semantics.
     const response = {
       api_version: '1.0',
-      generated_at: row?.generated_at ?? null,
       topic,
       items
     }
 
-    // Stable ETag payload: exclude generated_at
-    const etagPayload = {
-      api_version: response.api_version,
-      topic: response.topic,
-      items: response.items
-    }
+    // ETag computed from the exact bytes we would return in a 200
+    const body = JSON.stringify(response)
+    const etag = `"${sha256(body)}"`
 
-    const etag = `"${sha256(JSON.stringify(etagPayload))}"`
     const inm = event.headers['if-none-match'] || event.headers['If-None-Match']
     if (inm && inm === etag) return resp(304, '', { etag, cacheControl })
 
-    return resp(200, response, { etag, cacheControl })
+    return resp(200, body, { etag, cacheControl })
   } catch (err: any) {
     return resp(500, { error: err?.message ?? String(err) })
   }
