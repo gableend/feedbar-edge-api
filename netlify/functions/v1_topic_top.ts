@@ -13,11 +13,16 @@ function resp(statusCode: number, body: any, opts: { etag?: string; cacheControl
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type,If-None-Match',
-    'Vary': 'Origin'
+    'Vary': 'Origin,If-None-Match'
   }
   if (opts.cacheControl) headers['Cache-Control'] = opts.cacheControl
   if (opts.etag) headers['ETag'] = opts.etag
   return { statusCode, headers, body: typeof body === 'string' ? body : JSON.stringify(body) }
+}
+
+function toInt(v: any, fallback: number) {
+  const n = Number(v)
+  return Number.isFinite(n) ? Math.trunc(n) : fallback
 }
 
 export const handler: Handler = async (event) => {
@@ -32,10 +37,13 @@ export const handler: Handler = async (event) => {
   const cacheControl = 'public, max-age=30, s-maxage=120, stale-while-revalidate=900'
 
   try {
-    const topicSlug = (event.queryStringParameters?.topic_slug || '').trim()
-    const limitRaw = Number(event.queryStringParameters?.limit ?? 50)
-    const limit = Math.max(1, Math.min(limitRaw, 100))
+    // Canonicalize query inputs (reduce pointless cache misses)
+    const rawSlug = (event.queryStringParameters?.topic_slug ?? '').toString()
+    const topicSlug = rawSlug.trim().toLowerCase()
     if (!topicSlug) return resp(400, { error: 'Missing topic_slug' })
+
+    const limitRaw = toInt(event.queryStringParameters?.limit, 50)
+    const limit = Math.max(1, Math.min(limitRaw, 100))
 
     const { data, error } = await supabase.rpc('rpc_topic_top_v1', {
       p_topic_slug: topicSlug,
@@ -44,19 +52,30 @@ export const handler: Handler = async (event) => {
     if (error) throw error
 
     const row = Array.isArray(data) ? data[0] : data
+
+    const topic = row?.topic ?? { topic_slug: topicSlug, label: null }
+    const items = Array.isArray(row?.items) ? row.items : []
+
+    // Keep generated_at only if DB provides it (do NOT fall back to Date())
     const response = {
       api_version: '1.0',
-      generated_at: row?.generated_at ?? new Date().toISOString(),
-      topic: row?.topic ?? { topic_slug: topicSlug, label: null },
-      items: row?.items ?? []
+      generated_at: row?.generated_at ?? null,
+      topic,
+      items
     }
 
-    const body = JSON.stringify(response)
-    const etag = `"${sha256(body)}"`
+    // Stable ETag payload: exclude generated_at
+    const etagPayload = {
+      api_version: response.api_version,
+      topic: response.topic,
+      items: response.items
+    }
+
+    const etag = `"${sha256(JSON.stringify(etagPayload))}"`
     const inm = event.headers['if-none-match'] || event.headers['If-None-Match']
     if (inm && inm === etag) return resp(304, '', { etag, cacheControl })
 
-    return resp(200, body, { etag, cacheControl })
+    return resp(200, response, { etag, cacheControl })
   } catch (err: any) {
     return resp(500, { error: err?.message ?? String(err) })
   }
