@@ -67,7 +67,9 @@ export const handler: Handler = async (event) => {
       url: f.url,
       icon_url: f.icon_url ?? null,
       is_active: f.is_active ?? true,
-      items_7d: toNullableInt(f.items_7d) ?? 0,
+      items_30d: toNullableInt(f.items_30d) ?? 0,
+      last_item_at: f.last_item_at ?? null,
+      status: f.status ?? null,
       category: f.category
         ? {
             category_id: f.category.category_id ?? null,
