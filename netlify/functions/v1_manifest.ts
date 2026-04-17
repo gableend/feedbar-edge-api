@@ -31,7 +31,11 @@ export const handler: Handler = async (event) => {
     return errResp(500, 'SERVER_MISCONFIGURED', err?.message ?? 'Missing Supabase env')
   }
 
-  const cacheControl = 'public, max-age=300, s-maxage=3600, stale-while-revalidate=86400'
+  // Previously had s-maxage=3600, stale-while-revalidate=86400. That made config
+  // changes (topic colours, new feeds, toggles) linger on CDN nodes for up to
+  // a day. ETag still gives us 304s for unchanged bodies, so shorter TTLs
+  // don't cost much bandwidth but massively improve propagation.
+  const cacheControl = 'public, max-age=60, s-maxage=60, stale-while-revalidate=300'
 
   try {
     const { data, error } = await supabase.rpc('rpc_manifest_v1')
