@@ -2,18 +2,21 @@ import Parser from 'rss-parser';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { createServiceClient } from './lib/supabase';
+import { isPublicHttpUrl } from './lib/ssrf';
 
 const supabase = createServiceClient();
 
-type CustomItem = { 
-    author?: string; 
-    creator?: string; 
+type CustomItem = {
+    author?: string;
+    creator?: string;
     mediaContent?: { $: { url: string } };
     mediaThumbnail?: { $: { url: string } };
     itemImage?: { url: string };
     contentEncoded?: string;
 };
-type CustomFeed = {};
+// rss-parser's generic requires a feed-level type. We don't destructure any
+// feed-level custom fields so an empty object is intentional here.
+type CustomFeed = Record<string, never>;
 
 export interface CleanItem {
     title: string;
@@ -39,10 +42,11 @@ const parser: Parser<CustomFeed, CustomItem> = new Parser({
 });
 
 async function getOGImage(url: string): Promise<string | null> {
+    if (!isPublicHttpUrl(url)) return null;
     try {
-        const { data } = await axios.get(url, { 
+        const { data } = await axios.get(url, {
             timeout: 2500, // Slightly tighter timeout
-            headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' } 
+            headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' }
         });
         const $ = cheerio.load(data);
         return $('meta[property="og:image"]').attr('content') || 
@@ -59,6 +63,7 @@ export interface FetchedFeed {
 }
 
 export async function fetchFeed(url: string): Promise<FetchedFeed | null> {
+    if (!isPublicHttpUrl(url)) return null;
     try {
         const feed = await parser.parseURL(url);
         const feedTitle = feed.title?.trim() || null;

@@ -49,9 +49,13 @@ export const handler: Handler = async (event) => {
     `At:    ${new Date().toISOString()}`
   ].filter((l) => l !== null).join('\n')
 
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 5000)
   try {
     const r = await fetch('https://api.buttondown.email/v1/subscribers', {
       method: 'POST',
+      signal: ctrl.signal,
+      redirect: 'manual', // don't follow redirects with our auth header attached
       headers: {
         'Authorization': `Token ${apiKey}`,
         'Content-Type': 'application/json'
@@ -64,14 +68,17 @@ export const handler: Handler = async (event) => {
     })
 
     if (!r.ok) {
-      const text = await r.text()
-      console.error('[feedback] Buttondown POST failed', r.status, text)
+      console.error('[feedback] Buttondown POST failed', r.status)
       return errResp(502, 'UPSTREAM_FAILED', 'Could not deliver feedback')
     }
 
     return resp(200, { ok: true })
   } catch (err: any) {
-    console.error('[feedback] submission failed', err)
-    return errResp(500, 'SERVER_ERROR', err?.message ?? 'Internal error')
+    const aborted = err?.name === 'AbortError'
+    console.error('[feedback] submission failed', aborted ? 'timeout' : err?.name || 'error')
+    return errResp(aborted ? 504 : 500, aborted ? 'UPSTREAM_TIMEOUT' : 'SERVER_ERROR',
+                   aborted ? 'Upstream took too long' : 'Internal error')
+  } finally {
+    clearTimeout(timer)
   }
 }

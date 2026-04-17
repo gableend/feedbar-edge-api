@@ -1,23 +1,7 @@
 import type { Handler } from '@netlify/functions'
 import { createServiceClient } from '../../src/lib/supabase'
 import { resp, errResp, sha256, supabaseErr } from '../../src/lib/response'
-
-function cmpNullableNumber(a: any, b: any) {
-  const an = typeof a === 'number' ? a : Number.isFinite(Number(a)) ? Number(a) : null
-  const bn = typeof b === 'number' ? b : Number.isFinite(Number(b)) ? Number(b) : null
-  if (an === null && bn === null) return 0
-  if (an === null) return 1
-  if (bn === null) return -1
-  return an - bn
-}
-function cmpString(a: any, b: any) {
-  return ((a ?? '').toString()).localeCompare((b ?? '').toString())
-}
-function toNullableInt(v: any) {
-  if (v === null || v === undefined) return null
-  const n = Number(v)
-  return Number.isFinite(n) ? Math.trunc(n) : null
-}
+import { cmpNullableNumber, cmpString, toNullableInt } from '../../src/lib/sort'
 
 export const handler: Handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return resp(204, '')

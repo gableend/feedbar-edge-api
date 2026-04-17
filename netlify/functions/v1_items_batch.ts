@@ -1,6 +1,7 @@
 import type { Handler } from '@netlify/functions'
 import { createServiceClient } from '../../src/lib/supabase'
 import { resp, errResp, sha256, supabaseErr } from '../../src/lib/response'
+import { cmpString } from '../../src/lib/sort'
 
 const MAX_FEEDS = 20
 const MAX_PER_FEED = 30
@@ -13,10 +14,6 @@ function isUuidLike(s: string) {
 function parseIntSafe(v: any, fallback: number) {
   const n = Number(v)
   return Number.isFinite(n) ? Math.trunc(n) : fallback
-}
-
-function cmpString(a: any, b: any) {
-  return ((a ?? '').toString()).localeCompare((b ?? '').toString())
 }
 
 export const handler: Handler = async (event) => {
