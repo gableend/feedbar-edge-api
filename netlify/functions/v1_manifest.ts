@@ -1,36 +1,6 @@
 import type { Handler } from '@netlify/functions'
-import { createClient } from '@supabase/supabase-js'
-import crypto from 'crypto'
-
-function sha256(input: string) {
-  return crypto.createHash('sha256').update(input).digest('hex')
-}
-
-function resp(
-  statusCode: number,
-  body: any,
-  opts: { etag?: string; cacheControl?: string } = {}
-) {
-  const origin = process.env.CORS_ALLOW_ORIGIN ?? '*'
-
-  // Key: do NOT vary on If-None-Match (it fragments caches + creates noise)
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type,If-None-Match',
-    'Vary': 'Origin'
-  }
-
-  if (opts.cacheControl) headers['Cache-Control'] = opts.cacheControl
-  if (opts.etag) headers['ETag'] = opts.etag
-
-  return {
-    statusCode,
-    headers,
-    body: typeof body === 'string' ? body : JSON.stringify(body)
-  }
-}
+import { createServiceClient } from '../../src/lib/supabase'
+import { resp, errResp, sha256, supabaseErr } from '../../src/lib/response'
 
 // Deterministic sort helpers
 function cmpNullableNumber(a: any, b: any) {
@@ -42,11 +12,8 @@ function cmpNullableNumber(a: any, b: any) {
   return an - bn
 }
 function cmpString(a: any, b: any) {
-  const as = (a ?? '').toString()
-  const bs = (b ?? '').toString()
-  return as.localeCompare(bs)
+  return ((a ?? '').toString()).localeCompare((b ?? '').toString())
 }
-
 function toNullableInt(v: any) {
   if (v === null || v === undefined) return null
   const n = Number(v)
@@ -55,27 +22,23 @@ function toNullableInt(v: any) {
 
 export const handler: Handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return resp(204, '')
-  if (event.httpMethod !== 'GET') return resp(405, { error: 'Method Not Allowed' })
+  if (event.httpMethod !== 'GET') return errResp(405, 'METHOD_NOT_ALLOWED', 'Only GET is accepted')
 
-  const url = process.env.SUPABASE_URL || ''
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
-  if (!url || !key) return resp(500, { error: 'Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY' })
+  let supabase
+  try {
+    supabase = createServiceClient()
+  } catch (err: any) {
+    return errResp(500, 'SERVER_MISCONFIGURED', err?.message ?? 'Missing Supabase env')
+  }
 
-  const supabase = createClient(url, key, { auth: { persistSession: false } })
-
-  // If your #1 goal is avoiding noise/costs at scale:
-  // - CDN caches for an hour (s-maxage=3600)
-  // - Edge can serve stale while it revalidates in background
-  // - Browsers can keep a short max-age to reduce revalidation chatter
   const cacheControl = 'public, max-age=300, s-maxage=3600, stale-while-revalidate=86400'
 
   try {
     const { data, error } = await supabase.rpc('rpc_manifest_v1')
-    if (error) throw error
+    if (error) return supabaseErr(error)
 
     const row = Array.isArray(data) ? data[0] : data
 
-    // Build + canonicalize topics
     const topics = (row?.topics ?? []).map((t: any) => ({
       topic_id: t.topic_id,
       slug: t.slug,
@@ -94,7 +57,6 @@ export const handler: Handler = async (event) => {
       return cmpString(a.topic_id, b.topic_id)
     })
 
-    // Build + canonicalize feeds
     const feed_index = (row?.feeds ?? []).map((f: any) => ({
       feed_id: f.feed_id,
       title: f.title,
@@ -115,16 +77,12 @@ export const handler: Handler = async (event) => {
     feed_index.sort((a: any, b: any) => {
       const so = cmpNullableNumber(a.category?.sort_order ?? null, b.category?.sort_order ?? null)
       if (so !== 0) return so
-
       const cslug = cmpString(a.category?.slug, b.category?.slug)
       if (cslug !== 0) return cslug
-
       const cname = cmpString(a.category?.name, b.category?.name)
       if (cname !== 0) return cname
-
       const title = cmpString(a.title, b.title)
       if (title !== 0) return title
-
       return cmpString(a.feed_id, b.feed_id)
     })
 
@@ -134,9 +92,6 @@ export const handler: Handler = async (event) => {
       limit_per_feed_max: 30
     }
 
-    // Response body:
-    // Keep generated_at for humans, but NEVER let it affect ETag determinism.
-    // Also do NOT fallback to Date() here, or you reintroduce nondeterminism.
     const response = {
       api_version: '1.0',
       generated_at: row?.generated_at ?? null,
@@ -146,7 +101,7 @@ export const handler: Handler = async (event) => {
       feed_index
     }
 
-    // ETag based on stable representation (exclude generated_at)
+    // ETag on stable payload only (excludes generated_at).
     const etagPayload = {
       api_version: response.api_version,
       cache_ttl_sec: response.cache_ttl_sec,
@@ -157,11 +112,10 @@ export const handler: Handler = async (event) => {
 
     const etag = `"${sha256(JSON.stringify(etagPayload))}"`
     const inm = event.headers['if-none-match'] || event.headers['If-None-Match']
-
     if (inm && inm === etag) return resp(304, '', { etag, cacheControl })
 
     return resp(200, response, { etag, cacheControl })
   } catch (err: any) {
-    return resp(500, { error: err?.message ?? String(err) })
+    return supabaseErr(err)
   }
 }

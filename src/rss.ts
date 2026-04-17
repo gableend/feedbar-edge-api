@@ -1,7 +1,9 @@
 import Parser from 'rss-parser';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { supabase } from './supabase'; // Import supabase to check for existing items
+import { createServiceClient } from './lib/supabase';
+
+const supabase = createServiceClient();
 
 type CustomItem = { 
     author?: string; 
@@ -51,9 +53,15 @@ async function getOGImage(url: string): Promise<string | null> {
     }
 }
 
-export async function fetchFeed(url: string): Promise<CleanItem[] | null> {
+export interface FetchedFeed {
+    title: string | null;
+    items: CleanItem[];
+}
+
+export async function fetchFeed(url: string): Promise<FetchedFeed | null> {
     try {
         const feed = await parser.parseURL(url);
+        const feedTitle = feed.title?.trim() || null;
         const cleanedItems: CleanItem[] = [];
 
         // LIMIT: Only process the top 5 items per feed to save time
@@ -95,7 +103,7 @@ export async function fetchFeed(url: string): Promise<CleanItem[] | null> {
             });
         }
         
-        return cleanedItems;
+        return { title: feedTitle, items: cleanedItems };
     } catch (e) {
         console.error(`RSS Fail [${url}]:`, e);
         return null;

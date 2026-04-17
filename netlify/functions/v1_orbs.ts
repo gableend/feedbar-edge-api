@@ -1,27 +1,7 @@
 import type { Handler } from '@netlify/functions'
-import { createClient } from '@supabase/supabase-js'
-import crypto from 'crypto'
+import { createServiceClient } from '../../src/lib/supabase'
+import { resp, errResp, sha256, supabaseErr } from '../../src/lib/response'
 
-function sha256(input: string) {
-  return crypto.createHash('sha256').update(input).digest('hex')
-}
-
-function resp(statusCode: number, body: any, opts: { etag?: string; cacheControl?: string } = {}) {
-  const origin = process.env.CORS_ALLOW_ORIGIN ?? '*'
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type,If-None-Match',
-    // include If-None-Match in Vary so intermediaries don’t do dumb things
-    'Vary': 'Origin, If-None-Match'
-  }
-  if (opts.cacheControl) headers['Cache-Control'] = opts.cacheControl
-  if (opts.etag) headers['ETag'] = opts.etag
-  return { statusCode, headers, body: typeof body === 'string' ? body : JSON.stringify(body) }
-}
-
-// deterministic helpers
 function cmpNullableNumber(a: any, b: any) {
   const an = typeof a === 'number' ? a : Number.isFinite(Number(a)) ? Number(a) : null
   const bn = typeof b === 'number' ? b : Number.isFinite(Number(b)) ? Number(b) : null
@@ -31,9 +11,7 @@ function cmpNullableNumber(a: any, b: any) {
   return an - bn
 }
 function cmpString(a: any, b: any) {
-  const as = (a ?? '').toString()
-  const bs = (b ?? '').toString()
-  return as.localeCompare(bs)
+  return ((a ?? '').toString()).localeCompare((b ?? '').toString())
 }
 function toNullableInt(v: any) {
   if (v === null || v === undefined) return null
@@ -43,22 +21,23 @@ function toNullableInt(v: any) {
 
 export const handler: Handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return resp(204, '')
-  if (event.httpMethod !== 'GET') return resp(405, { error: 'Method Not Allowed' })
+  if (event.httpMethod !== 'GET') return errResp(405, 'METHOD_NOT_ALLOWED', 'Only GET is accepted')
 
-  const url = process.env.SUPABASE_URL || ''
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
-  if (!url || !key) return resp(500, { error: 'Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY' })
+  let supabase
+  try {
+    supabase = createServiceClient()
+  } catch (err: any) {
+    return errResp(500, 'SERVER_MISCONFIGURED', err?.message ?? 'Missing Supabase env')
+  }
 
-  const supabase = createClient(url, key, { auth: { persistSession: false } })
   const cacheControl = 'public, max-age=60, s-maxage=300, stale-while-revalidate=3600'
 
   try {
     const { data, error } = await supabase.rpc('rpc_orbs_v1')
-    if (error) throw error
+    if (error) return supabaseErr(error)
 
     const row = Array.isArray(data) ? data[0] : data
 
-    // Build + canonicalize orbs
     const orbs = (row?.orbs ?? []).map((o: any) => ({
       topic_id: o.topic_id,
       topic_slug: o.topic_slug,
@@ -80,9 +59,7 @@ export const handler: Handler = async (event) => {
       updated_at: o.updated_at ?? null
     }))
 
-    // Deterministic ordering (don’t trust upstream JSON agg ordering forever)
     orbs.sort((a: any, b: any) => {
-      // If you want topic sort order, include it in the RPC; for now use slug/label
       const slug = cmpString(a.topic_slug, b.topic_slug)
       if (slug !== 0) return slug
       const label = cmpString(a.topic_label, b.topic_label)
@@ -90,19 +67,20 @@ export const handler: Handler = async (event) => {
       return cmpString(a.topic_id, b.topic_id)
     })
 
-    // Optional: deterministic ordering inside arrays (helps avoid accidental reshuffles)
     for (const o of orbs) {
-      if (Array.isArray(o.keywords)) o.keywords = [...o.keywords].map(String).sort((x: string, y: string) => x.localeCompare(y))
+      if (Array.isArray(o.keywords)) {
+        o.keywords = [...o.keywords].map(String).sort((x: string, y: string) => x.localeCompare(y))
+      }
       if (Array.isArray(o.top_sources)) {
         o.top_sources = [...o.top_sources].sort((x: any, y: any) => {
-          const c = cmpNullableNumber(y?.count ?? null, x?.count ?? null) // desc count
+          const c = cmpNullableNumber(y?.count ?? null, x?.count ?? null)
           if (c !== 0) return c
           return cmpString(x?.feed_id, y?.feed_id)
         })
       }
       if (Array.isArray(o.top_items)) {
         o.top_items = [...o.top_items].sort((x: any, y: any) => {
-          const s = cmpNullableNumber(y?.score ?? null, x?.score ?? null) // desc score
+          const s = cmpNullableNumber(y?.score ?? null, x?.score ?? null)
           if (s !== 0) return s
           return cmpString(x?.item_id, y?.item_id)
         })
@@ -111,24 +89,17 @@ export const handler: Handler = async (event) => {
 
     const response = {
       api_version: '1.0',
-      generated_at: row?.generated_at ?? null, // DO NOT fallback to Date() or you reintroduce nondeterminism
+      generated_at: row?.generated_at ?? null,
       orbs
     }
 
-    // ETag: stable payload only (exclude generated_at)
-    // Strong opinion: also exclude updated_at if you don’t want a repaint when only timestamps drift.
-    // If updated_at is legit “data changed”, keep it included.
-    const etagPayload = {
-      api_version: response.api_version,
-      orbs: response.orbs
-    }
-
+    const etagPayload = { api_version: response.api_version, orbs: response.orbs }
     const etag = `"${sha256(JSON.stringify(etagPayload))}"`
     const inm = event.headers['if-none-match'] || event.headers['If-None-Match']
     if (inm && inm === etag) return resp(304, '', { etag, cacheControl })
 
     return resp(200, response, { etag, cacheControl })
   } catch (err: any) {
-    return resp(500, { error: err?.message ?? String(err) })
+    return supabaseErr(err)
   }
 }

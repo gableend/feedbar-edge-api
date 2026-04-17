@@ -1,35 +1,6 @@
 import type { Handler } from '@netlify/functions'
-import { createClient } from '@supabase/supabase-js'
-import crypto from 'crypto'
-
-function sha256(input: string) {
-  return crypto.createHash('sha256').update(input).digest('hex')
-}
-
-function resp(
-  statusCode: number,
-  body: any,
-  opts: { etag?: string; cacheControl?: string } = {}
-) {
-  const origin = process.env.CORS_ALLOW_ORIGIN ?? '*'
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type,If-None-Match',
-    // Important: If-None-Match affects the representation (200 body vs 304 empty)
-    'Vary': 'Origin,If-None-Match'
-  }
-
-  if (opts.cacheControl) headers['Cache-Control'] = opts.cacheControl
-  if (opts.etag) headers['ETag'] = opts.etag
-
-  return {
-    statusCode,
-    headers,
-    body: typeof body === 'string' ? body : JSON.stringify(body)
-  }
-}
+import { createServiceClient } from '../../src/lib/supabase'
+import { resp, errResp, sha256, supabaseErr } from '../../src/lib/response'
 
 function toInt(v: any, fallback: number) {
   const n = Number(v)
@@ -38,20 +9,21 @@ function toInt(v: any, fallback: number) {
 
 export const handler: Handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return resp(204, '')
-  if (event.httpMethod !== 'GET') return resp(405, { error: 'Method Not Allowed' })
+  if (event.httpMethod !== 'GET') return errResp(405, 'METHOD_NOT_ALLOWED', 'Only GET is accepted')
 
-  const url = process.env.SUPABASE_URL || ''
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
-  if (!url || !key) return resp(500, { error: 'Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY' })
+  let supabase
+  try {
+    supabase = createServiceClient()
+  } catch (err: any) {
+    return errResp(500, 'SERVER_MISCONFIGURED', err?.message ?? 'Missing Supabase env')
+  }
 
-  const supabase = createClient(url, key, { auth: { persistSession: false } })
   const cacheControl = 'public, max-age=30, s-maxage=120, stale-while-revalidate=900'
 
   try {
-    // Canonicalize inputs to reduce cache fragmentation
     const rawSlug = (event.queryStringParameters?.topic_slug ?? '').toString()
     const topicSlug = rawSlug.trim().toLowerCase()
-    if (!topicSlug) return resp(400, { error: 'Missing topic_slug' })
+    if (!topicSlug) return errResp(400, 'MISSING_TOPIC_SLUG', 'Query parameter "topic_slug" is required')
 
     const limitRaw = toInt(event.queryStringParameters?.limit, 50)
     const limit = Math.max(1, Math.min(limitRaw, 100))
@@ -60,29 +32,25 @@ export const handler: Handler = async (event) => {
       p_topic_slug: topicSlug,
       p_limit: limit
     })
-    if (error) throw error
+    if (error) return supabaseErr(error)
 
     const row = Array.isArray(data) ? data[0] : data
-
     const topic = row?.topic ?? { topic_slug: topicSlug, label: null }
     const items = Array.isArray(row?.items) ? row.items : []
 
-    // IMPORTANT: keep the response free of "now()" fields so body == etag semantics.
     const response = {
       api_version: '1.0',
       topic,
       items
     }
 
-    // ETag computed from the exact bytes we would return in a 200
     const body = JSON.stringify(response)
     const etag = `"${sha256(body)}"`
-
     const inm = event.headers['if-none-match'] || event.headers['If-None-Match']
     if (inm && inm === etag) return resp(304, '', { etag, cacheControl })
 
     return resp(200, body, { etag, cacheControl })
   } catch (err: any) {
-    return resp(500, { error: err?.message ?? String(err) })
+    return supabaseErr(err)
   }
 }
