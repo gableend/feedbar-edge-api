@@ -31,6 +31,10 @@ export const handler: Handler = async (event) => {
       window_end: o.window_end ?? null,
       window_minutes: toNullableInt(o.window_minutes),
       keywords: Array.isArray(o.keywords) ? o.keywords : [],
+      // Parallel to keywords: one URL (or null) per phrase so the client can
+      // render each phrase as a clickable jump-to-article button. Null-pad
+      // to match keywords length so index-alignment is invariant for clients.
+      keyword_urls: Array.isArray(o.keyword_urls) ? o.keyword_urls : [],
       sentiment: o.sentiment ?? { label: null, score: null },
       summary: o.summary ?? null,
       velocity: o.velocity ?? { per_hour: null, ui: null },
@@ -52,8 +56,15 @@ export const handler: Handler = async (event) => {
     })
 
     for (const o of orbs) {
+      // Pre-v3 we alphabetised keywords because they were a bag of words.
+      // v3+ ships ordered 3-word phrases paired index-wise with keyword_urls,
+      // so sorting would desync the (phrase, url) pairing. Coerce to strings
+      // for ETag stability but preserve server-side order.
       if (Array.isArray(o.keywords)) {
-        o.keywords = [...o.keywords].map(String).sort((x: string, y: string) => x.localeCompare(y))
+        o.keywords = [...o.keywords].map(String)
+      }
+      if (Array.isArray(o.keyword_urls)) {
+        o.keyword_urls = [...o.keyword_urls].map((v: any) => (typeof v === 'string' && v.length > 0 ? v : null))
       }
       if (Array.isArray(o.top_sources)) {
         o.top_sources = [...o.top_sources].sort((x: any, y: any) => {
