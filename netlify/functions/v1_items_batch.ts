@@ -64,11 +64,24 @@ export const handler: Handler = async (event) => {
   const requestedLimit = parseIntSafe(qs.get('limit_per_feed'), DEFAULT_PER_FEED)
   const limitPerFeed = Math.max(1, Math.min(requestedLimit, MAX_PER_FEED))
 
+  // Optional recency window. Used by dynamic bundles like "Pulse" to only
+  // return items published in the last N minutes. Omitted → server default
+  // (30 days). Clamped to [1, 7*24*60] so bad input can't hog the planner.
+  const rawSince = qs.get('since_minutes')
+  let sinceMinutes: number | null = null
+  if (rawSince != null && rawSince !== '') {
+    const n = parseIntSafe(rawSince, 0)
+    if (n > 0) sinceMinutes = Math.min(n, 7 * 24 * 60)
+  }
+
   try {
-    const { data, error } = await supabase.rpc('rpc_items_batch_v1', {
+    const rpcArgs: Record<string, unknown> = {
       p_feed_ids: canonicalFeedIds,
       p_limit_per_feed: limitPerFeed
-    })
+    }
+    if (sinceMinutes != null) rpcArgs.p_since_minutes = sinceMinutes
+
+    const { data, error } = await supabase.rpc('rpc_items_batch_v1', rpcArgs)
     if (error) return supabaseErr(error)
 
     const row = Array.isArray(data) ? data[0] : data
@@ -93,7 +106,11 @@ export const handler: Handler = async (event) => {
 
     const response = {
       api_version: '1.0',
-      request: { feed_ids: canonicalFeedIds, limit_per_feed: limitPerFeed },
+      request: {
+        feed_ids: canonicalFeedIds,
+        limit_per_feed: limitPerFeed,
+        ...(sinceMinutes != null ? { since_minutes: sinceMinutes } : {})
+      },
       items
     }
 
